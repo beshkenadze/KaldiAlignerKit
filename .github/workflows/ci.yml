@@ -46,7 +46,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/kaldi
-          key: kaldi-${{ runner.os }}-${{ runner.arch }}-v3
+          key: kaldi-${{ runner.os }}-${{ runner.arch }}-v4
 
       - name: Install build dependencies
         if: steps.cache-kaldi.outputs.cache-hit != 'true'
@@ -58,16 +58,14 @@ jobs:
           git clone --depth 1 https://github.com/kaldi-asr/kaldi.git /tmp/kaldi
           cd /tmp/kaldi/tools
 
-          # Download OpenFST from GitHub mirror (openfst.org is unreliable in CI)
+          # Download OpenFST 1.8.4 from our repo mirror (openfst.org blocks CI IPs)
           curl -fSL \
-            "https://github.com/kkm000/openfst/archive/refs/tags/orig/1.8.1.1.tar.gz" \
-            -o openfst.tar.gz
-          tar xf openfst.tar.gz
-          mv openfst-orig-1.8.1.1 openfst-1.8.1
+            "https://github.com/beshkenadze/KaldiAlignerKit/releases/download/openfst-1.8.4/openfst-1.8.4.tar.gz" \
+            -o openfst-1.8.4.tar.gz
+          tar xf openfst-1.8.4.tar.gz
 
           # Build OpenFST directly (bypass check_dependencies.sh)
-          cd openfst-1.8.1
-          autoreconf -fi 2>/dev/null || true
+          cd openfst-1.8.4
           CXXFLAGS="-O3 -fPIC" ./configure \
             --enable-static --disable-shared \
             --enable-far --enable-ngram-fsts \
