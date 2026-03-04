@@ -87,6 +87,13 @@ jobs:
           sudo mkdir -p /Volumes/DATA
           sudo ln -s /tmp/kaldi /Volumes/DATA/kaldi
 
+      - name: Verify Kaldi libs
+        run: |
+          echo "=== Kaldi static libs ==="
+          find /Volumes/DATA/kaldi/src -name 'libkaldi-*.a' | sort
+          echo "=== OpenFST libs ==="
+          find /Volumes/DATA/kaldi/tools/openfst/lib -name '*.a' | sort
+
       - name: Build
         run: swift build --target KaldiAlignerKit
 

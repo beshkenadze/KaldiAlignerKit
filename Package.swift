@@ -57,7 +57,8 @@ let package = Package(
         ),
         .target(
             name: "KaldiAlignerKit",
-            dependencies: ["KaldiCore"]
+            dependencies: ["KaldiCore"],
+            linkerSettings: kaldiLinkerSettings
         ),
         .executableTarget(
             name: "SwiftKaldiBench",
