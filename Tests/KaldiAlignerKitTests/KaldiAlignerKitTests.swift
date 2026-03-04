@@ -1,12 +1,12 @@
-import XCTest
 @testable import KaldiAlignerKit
+import XCTest
 
 final class KaldiAlignerKitTests: XCTestCase {
     func testAlignerInitFailsWithBadPath() {
         XCTAssertThrowsError(
             try KaldiAligner(modelDir: "/nonexistent", dictPath: "/nonexistent")
         ) { error in
-            guard case AlignerError.initFailed(let msg) = error else {
+            guard case let AlignerError.initFailed(msg) = error else {
                 XCTFail("Expected initFailed, got \(error)")
                 return
             }

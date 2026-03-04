@@ -20,11 +20,11 @@ let kaldiLinkerSettings: [LinkerSetting] = [
     .unsafeFlags(["-L\(kaldiSrc)/base", "-lkaldi-base"]),
     .unsafeFlags(["-L\(openfstRoot)/lib", "-lfst", "-lfstngram", "-lfstfar"]),
     .linkedFramework("Accelerate"),
-    .unsafeFlags(["-lc++"]),
+    .unsafeFlags(["-lc++"])
 ]
 
 let kaldiHeaderSettings: [CSetting] = [
-    .unsafeFlags(["-I\(kaldiSrc)", "-I\(openfstRoot)/include"]),
+    .unsafeFlags(["-I\(kaldiSrc)", "-I\(openfstRoot)/include"])
 ]
 
 let package = Package(
@@ -32,13 +32,9 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "KaldiAlignerKit", targets: ["KaldiAlignerKit"]),
-        .executable(name: "swift-kaldi-bench", targets: ["SwiftKaldiBench"]),
-        .executable(name: "integration-bench", targets: ["IntegrationBench"]),
+        .executable(name: "swift-kaldi-bench", targets: ["SwiftKaldiBench"])
     ],
-    dependencies: [
-        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.7.9"),
-        .package(url: "https://github.com/Blaizzy/mlx-audio-swift.git", branch: "main"),
-    ],
+    dependencies: [],
     targets: [
         .target(
             name: "KaldiCore",
@@ -54,8 +50,8 @@ let package = Package(
                     "-DOPENFST_VER=10804",
                     "-DKALDI_DOUBLEPRECISION=0",
                     "-DHAVE_EXECINFO_H=1",
-                    "-DHAVE_CXXABI_H=1",
-                ]),
+                    "-DHAVE_CXXABI_H=1"
+                ])
             ],
             linkerSettings: kaldiLinkerSettings
         ),
@@ -67,16 +63,6 @@ let package = Package(
             name: "SwiftKaldiBench",
             dependencies: ["KaldiAlignerKit"],
             path: "Sources/SwiftKaldiBench"
-        ),
-        .executableTarget(
-            name: "IntegrationBench",
-            dependencies: [
-                "KaldiAlignerKit",
-                .product(name: "FluidAudio", package: "FluidAudio"),
-                .product(name: "MLXAudioSTT", package: "mlx-audio-swift"),
-                .product(name: "MLXAudioCore", package: "mlx-audio-swift"),
-            ],
-            path: "Sources/IntegrationBench"
         ),
         .testTarget(
             name: "KaldiAlignerKitTests",

@@ -27,7 +27,7 @@ public final class KaldiAligner {
             kaldi_aligner_destroy(h)
             throw AlignerError.initFailed(msg)
         }
-        self.handle = h
+        handle = h
     }
 
     deinit {
@@ -63,7 +63,7 @@ public final class KaldiAligner {
 
         var result: [WordAlignment] = []
         if let intervals = cResult.intervals {
-            for i in 0..<Int(cResult.count) {
+            for i in 0 ..< Int(cResult.count) {
                 let item = intervals[i]
                 if let wordPtr = item.word {
                     result.append(WordAlignment(

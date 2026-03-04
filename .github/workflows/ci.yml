@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: SwiftLint
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SwiftLint
+        run: brew install swiftlint
+
+      - name: Lint
+        run: swiftlint lint --strict --quiet
+
+  format:
+    name: SwiftFormat
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SwiftFormat
+        run: brew install swiftformat
+
+      - name: Check formatting
+        run: swiftformat . --lint
+
+  build-test:
+    name: Build & Test
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Kaldi
+        id: cache-kaldi
+        uses: actions/cache@v4
+        with:
+          path: /tmp/kaldi
+          key: kaldi-arm64-${{ runner.os }}-v1
+
+      - name: Build Kaldi
+        if: steps.cache-kaldi.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 https://github.com/kaldi-asr/kaldi.git /tmp/kaldi
+          cd /tmp/kaldi/tools
+          OPENFST_CONFIGURE="--enable-static --disable-shared --enable-far --enable-ngram-fsts --enable-lookahead-fsts --with-pic" \
+            CXXFLAGS="-O3 -fPIC" \
+            make -j$(sysctl -n hw.ncpu) openfst
+          cd ../src
+          ./configure --static --static-fst --fst-root="$(cd ../tools/openfst && pwd)"
+          CXXFLAGS="-O3 -fPIC" make -j$(sysctl -n hw.ncpu) \
+            base matrix util feat tree gmm hmm transform fstext decoder lat lm
+
+      - name: Symlink Kaldi to expected path
+        run: |
+          sudo mkdir -p /Volumes/DATA
+          sudo ln -s /tmp/kaldi /Volumes/DATA/kaldi
+
+      - name: Build
+        run: swift build --target KaldiAlignerKit
+
+      - name: Test
+        run: swift test
