@@ -9,7 +9,6 @@ Uses MFA (Montreal Forced Aligner) acoustic models and dictionaries. Zero Python
 - macOS 14+, Apple Silicon (arm64)
 - Xcode 16.3+ (Swift 6.2, C++17)
 - Kaldi + OpenFst static libraries (see [Build Kaldi](#build-kaldi))
-- MFA acoustic model + pronunciation dictionary (see [MFA Models](#mfa-models))
 
 ## Installation
 
@@ -65,26 +64,32 @@ let openfstRoot = "\(kaldiRoot)/tools/openfst"
 
 > **Note**: SPM requires absolute paths for linker flags. Relative paths will fail.
 
-### 4. Build with Xcode
-
-`swift build` cannot compile Metal shaders (needed by MLX dependencies in the integration bench). For the library itself:
+### 4. Build
 
 ```bash
-# Library-only build works with swift build
 swift build --target KaldiAlignerKit
-
-# For executables that use MLX, use xcodebuild
-xcodebuild build -scheme integration-bench -configuration Release \
-  -destination 'platform=OS X' -derivedDataPath ./xc-build
 ```
 
 ## MFA Models
 
-Download pre-trained MFA acoustic models and dictionaries. The aligner needs:
-- **Model directory** — contains `final.alimdl` (or `final.mdl`), `tree`, `lda.mat`, `phones.txt`
-- **Dictionary file** — tab-separated: `word\tphone1 phone2 ...`
+The aligner needs an MFA acoustic model and pronunciation dictionary.
 
-### Download via MFA CLI
+### Automatic Download
+
+KaldiAlignerKit can download MFA models automatically from [GitHub releases](https://github.com/MontrealCorpusTools/mfa-models/releases):
+
+```swift
+// Download model + dictionary, create aligner in one step
+let aligner = try await KaldiAligner.withModel("english_mfa")
+
+// Or download separately for more control
+let paths = try await MFAModelDownloader.download("russian_mfa")
+let aligner = try KaldiAligner(modelDir: paths.modelDir, dictPath: paths.dictPath)
+```
+
+Models are cached in `~/Library/Caches/KaldiAlignerKit/`. Subsequent calls skip the download.
+
+### Manual Download via MFA CLI
 
 ```bash
 pip install montreal-forced-aligner
@@ -109,16 +114,13 @@ Full list: [MFA pretrained models](https://mfa-models.readthedocs.io/en/latest/a
 
 ## Usage
 
-### Basic
+### Quick Start
 
 ```swift
 import KaldiAlignerKit
 
-// Load model once (EN: ~0.2s, RU: ~1.3s)
-let aligner = try KaldiAligner(
-    modelDir: "/path/to/english_mfa",
-    dictPath: "/path/to/english_mfa.dict"
-)
+// Download model and create aligner
+let aligner = try await KaldiAligner.withModel("english_mfa")
 
 // Align audio + transcript → word timestamps
 let words = try aligner.align(
@@ -134,6 +136,15 @@ for word in words {
 // world: 0.690–1.050s
 // this:  1.050–1.230s
 // ...
+```
+
+### Manual Model Paths
+
+```swift
+let aligner = try KaldiAligner(
+    modelDir: "/path/to/english_mfa",
+    dictPath: "/path/to/english_mfa.dict"
+)
 ```
 
 ### Audio Preparation
@@ -197,7 +208,7 @@ do {
 For long audio, segment first (e.g., with VAD), then align each segment:
 
 ```swift
-let aligner = try KaldiAligner(modelDir: modelDir, dictPath: dictPath)
+let aligner = try await KaldiAligner.withModel("english_mfa")
 
 for segment in vadSegments {
     let segSamples = Array(allSamples[segment.startSample..<segment.endSample])
@@ -226,22 +237,36 @@ for segment in vadSegments {
 ```swift
 public final class KaldiAligner {
     /// Load Kaldi acoustic model and pronunciation dictionary.
-    /// - Parameters:
-    ///   - modelDir: Path to extracted MFA model directory
-    ///     (must contain: final.alimdl or final.mdl, tree, lda.mat, phones.txt)
-    ///   - dictPath: Path to pronunciation dictionary file
-    ///     (tab-separated: word<TAB>phone1 phone2 ...)
-    /// - Throws: AlignerError.initFailed if model files are missing or invalid
     public init(modelDir: String, dictPath: String) throws
 
+    /// Download MFA model and create aligner in one step.
+    public static func withModel(
+        _ name: String,
+        version: String? = nil,
+        cacheDir: URL? = nil
+    ) async throws -> KaldiAligner
+
     /// Perform forced alignment on audio with known transcript.
-    /// - Parameters:
-    ///   - audio: Raw PCM Float32 samples (mono, 16kHz recommended)
-    ///   - sampleRate: Sample rate in Hz (16000 recommended)
-    ///   - transcript: Space-separated words to align
-    /// - Returns: Array of WordAlignment with per-word timestamps
-    /// - Throws: AlignerError.alignmentFailed if Viterbi decoding fails
     public func align(audio: [Float], sampleRate: Int, transcript: String) throws -> [WordAlignment]
+}
+```
+
+### `MFAModelDownloader`
+
+```swift
+public enum MFAModelDownloader {
+    /// Download MFA acoustic model and dictionary.
+    /// Caches in ~/Library/Caches/KaldiAlignerKit/.
+    public static func download(
+        _ name: String,             // e.g. "english_mfa", "russian_mfa"
+        version: String? = nil,     // default: latest known
+        cacheDir: URL? = nil
+    ) async throws -> MFAModelPaths
+}
+
+public struct MFAModelPaths: Sendable {
+    public let modelDir: String
+    public let dictPath: String
 }
 ```
 
@@ -289,13 +314,6 @@ Benchmarked on Apple M4 Max:
 | Model load | 0.23s | 1.28s |
 | Alignment | 0.13s (79 words) | 0.11s (25 words) |
 
-Full pipeline (19 min audio, VAD → ASR → Align):
-
-| | Swift | Python | Advantage |
-|---|---|---|---|
-| English | 60.8s (19.1x RT) | 303.9s (3.8x RT) | **5.0x** |
-| Russian | 82.1s (13.9x RT) | 226.2s (5.1x RT) | **2.75x** |
-
 Kaldi alignment accuracy matches MFA Python API within ~100ms (within inherent forced alignment uncertainty).
 
 ## Project Structure
@@ -307,12 +325,34 @@ Sources/
 │   └── include/
 │       └── KaldiAligner.hpp
 ├── KaldiAlignerKit/        # Swift public API
-│   └── KaldiAligner.swift  # KaldiAligner, WordAlignment, AlignerError
-├── SwiftKaldiBench/        # Standalone Kaldi benchmark (short clips)
-└── IntegrationBench/       # Full pipeline: VAD → ASR → Align
+│   ├── KaldiAligner.swift  # KaldiAligner, WordAlignment, AlignerError
+│   └── ModelDownloader.swift # MFA model download + cache
+└── SwiftKaldiBench/        # Standalone Kaldi benchmark
 Tests/
 └── KaldiAlignerKitTests/
 ```
+
+## Development
+
+### Linting & Formatting
+
+```bash
+# Lint
+swiftlint lint --strict
+
+# Format
+swiftformat .
+
+# Check format without changing files
+swiftformat . --lint
+```
+
+### CI
+
+GitHub Actions runs on every push/PR to `main`:
+- **SwiftLint** — code quality
+- **SwiftFormat** — consistent style
+- **Build & Test** — compiles Kaldi from source (cached), runs `swift test`
 
 ## License
 
