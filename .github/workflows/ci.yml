@@ -10,9 +10,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  OPENFST_VERSION: "1.8.4"
-
 jobs:
   lint:
     name: SwiftLint
@@ -49,29 +46,27 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/kaldi
-          key: kaldi-${{ runner.os }}-${{ runner.arch }}-v2
+          key: kaldi-${{ runner.os }}-${{ runner.arch }}-v3
 
       - name: Install build dependencies
         if: steps.cache-kaldi.outputs.cache-hit != 'true'
         run: brew install automake autoconf libtool
 
-      - name: Build OpenFST
+      - name: Clone Kaldi & Build OpenFST
         if: steps.cache-kaldi.outputs.cache-hit != 'true'
         run: |
           git clone --depth 1 https://github.com/kaldi-asr/kaldi.git /tmp/kaldi
           cd /tmp/kaldi/tools
 
-          # Download OpenFST (try multiple mirrors)
-          curl -fSL -A "Mozilla/5.0" \
-            "https://www.openfst.org/twiki/pub/FST/FstDownload/openfst-${OPENFST_VERSION}.tar.gz" \
-            -o openfst-${OPENFST_VERSION}.tar.gz \
-          || curl -fSL \
-            "https://www.openslr.org/resources/2/openfst-${OPENFST_VERSION}.tar.gz" \
-            -o openfst-${OPENFST_VERSION}.tar.gz
+          # Download OpenFST from GitHub mirror (openfst.org is unreliable in CI)
+          curl -fSL \
+            "https://github.com/kkm000/openfst/archive/refs/tags/orig/1.8.1.1.tar.gz" \
+            -o openfst.tar.gz
+          tar xf openfst.tar.gz
+          mv openfst-orig-1.8.1.1 openfst-1.8.1
 
           # Build OpenFST directly (bypass check_dependencies.sh)
-          tar xf openfst-${OPENFST_VERSION}.tar.gz
-          cd openfst-${OPENFST_VERSION}
+          cd openfst-1.8.1
           autoreconf -fi 2>/dev/null || true
           CXXFLAGS="-O3 -fPIC" ./configure \
             --enable-static --disable-shared \
