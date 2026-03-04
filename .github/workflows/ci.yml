@@ -78,7 +78,7 @@ jobs:
         if: steps.cache-kaldi.outputs.cache-hit != 'true'
         run: |
           cd /tmp/kaldi/src
-          ./configure --static --static-fst --fst-root="$(cd ../tools/openfst && pwd)"
+          ./configure --static --static-fst --fst-root="$(cd ../tools/openfst && pwd)" --fst-version=1.8.4
           CXXFLAGS="-O3 -fPIC" make -j$(sysctl -n hw.ncpu) \
             base matrix util feat tree gmm hmm transform fstext decoder lat lm
 
