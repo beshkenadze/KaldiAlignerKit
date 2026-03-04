@@ -1,0 +1,6 @@
+.build/
+xc-build/
+.swiftpm/xcode/
+.DS_Store
+*.o
+*.a
