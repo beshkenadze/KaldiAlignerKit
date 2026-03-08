@@ -11,6 +11,10 @@ on:
 permissions:
   contents: write
 
+env:
+  KALDI_CACHE_DIR: .build/vendor/kaldi
+  OPENFST_VERSION: 1.8.4
+
 jobs:
   release:
     name: Build and Publish Release
@@ -22,7 +26,25 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Compute toolchain fingerprint
+        id: toolchain
+        run: |
+          {
+            xcodebuild -version
+            swift --version
+          } > .toolchain-version.txt
+          FINGERPRINT="$(shasum -a 256 .toolchain-version.txt | cut -d' ' -f1)"
+          echo "fingerprint=$FINGERPRINT" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cached Kaldi toolchain
+        id: cache-kaldi
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.KALDI_CACHE_DIR }}
+          key: ${{ runner.os }}-kaldi-${{ env.OPENFST_VERSION }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('scripts/build-kaldi.sh') }}
+
       - name: Install build dependencies
+        if: steps.cache-kaldi.outputs.cache-hit != 'true'
         run: brew install automake autoconf libtool
 
       - name: Render source manifest

@@ -10,6 +10,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  KALDI_CACHE_DIR: .build/vendor/kaldi
+  OPENFST_VERSION: 1.8.4
+
 jobs:
   lint:
     name: SwiftLint
@@ -47,38 +51,82 @@ jobs:
             Package.swift README.md Sources/SwiftKaldiBench scripts .github/workflows \
             ':(exclude).github/workflows/ci.yml'
 
-  build-test:
-    name: Source Build & Test
+  prepare-kaldi:
+    name: Prepare Kaldi Toolchain
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
+      - name: Compute toolchain fingerprint
+        id: toolchain
+        run: |
+          {
+            xcodebuild -version
+            swift --version
+          } > .toolchain-version.txt
+          FINGERPRINT="$(shasum -a 256 .toolchain-version.txt | cut -d' ' -f1)"
+          echo "fingerprint=$FINGERPRINT" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cached Kaldi toolchain
+        id: cache-kaldi
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.KALDI_CACHE_DIR }}
+          key: ${{ runner.os }}-kaldi-${{ env.OPENFST_VERSION }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('scripts/build-kaldi.sh') }}
+
       - name: Install build dependencies
+        if: steps.cache-kaldi.outputs.cache-hit != 'true'
         run: brew install automake autoconf libtool
+
+      - name: Build Kaldi
+        if: steps.cache-kaldi.outputs.cache-hit != 'true'
+        run: ./scripts/build-kaldi.sh "$PWD/${{ env.KALDI_CACHE_DIR }}"
+
+      - name: Upload Kaldi toolchain artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kaldi-toolchain-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.KALDI_CACHE_DIR }}
+          if-no-files-found: error
+          retention-days: 1
+
+  build-test:
+    name: Source Build & Test
+    runs-on: macos-15
+    needs: prepare-kaldi
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Kaldi toolchain artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: kaldi-toolchain-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.KALDI_CACHE_DIR }}
 
       - name: Render source manifest
         run: ./scripts/render-package-manifest.sh source
 
-      - name: Build Kaldi
-        run: ./scripts/build-kaldi.sh "$PWD/.build/vendor/kaldi"
-
       - name: Build package
-        run: KALDI_ROOT="$PWD/.build/vendor/kaldi" swift build --target KaldiAlignerKit
+        run: KALDI_ROOT="$PWD/${{ env.KALDI_CACHE_DIR }}" swift build --target KaldiAlignerKit
 
       - name: Run tests
-        run: KALDI_ROOT="$PWD/.build/vendor/kaldi" swift test
+        run: KALDI_ROOT="$PWD/${{ env.KALDI_CACHE_DIR }}" swift test
 
   binary-consumer-smoke:
     name: Binary Consumer Smoke
     runs-on: macos-15
+    needs: prepare-kaldi
     steps:
       - uses: actions/checkout@v4
 
       - name: Validate checked-in binary manifest
         run: swift package dump-package
 
-      - name: Install build dependencies
-        run: brew install automake autoconf libtool
+      - name: Download Kaldi toolchain artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: kaldi-toolchain-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.KALDI_CACHE_DIR }}
 
       - name: Render source manifest
         run: ./scripts/render-package-manifest.sh source
