@@ -35,72 +35,56 @@ jobs:
       - name: Check formatting
         run: swiftformat . --lint
 
-  build-test:
-    name: Build & Test
+  path-hygiene:
+    name: Path Hygiene
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache Kaldi
-        id: cache-kaldi
-        uses: actions/cache@v4
-        with:
-          path: /tmp/kaldi
-          key: kaldi-${{ runner.os }}-${{ runner.arch }}-v4
+      - name: Reject hardcoded local paths in owned files
+        run: |
+          ! git grep -nE '/Volumes/DATA|/Downloads|/Documents/MFA|/usr/bin/ditto|NSHomeDirectory\(' -- \
+            Package.swift README.md Sources/SwiftKaldiBench scripts .github/workflows \
+            ':(exclude).github/workflows/ci.yml'
+
+  build-test:
+    name: Source Build & Test
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Install build dependencies
-        if: steps.cache-kaldi.outputs.cache-hit != 'true'
         run: brew install automake autoconf libtool
 
-      - name: Clone Kaldi & Build OpenFST
-        if: steps.cache-kaldi.outputs.cache-hit != 'true'
-        run: |
-          git clone --depth 1 https://github.com/kaldi-asr/kaldi.git /tmp/kaldi
-          cd /tmp/kaldi/tools
-
-          # Download OpenFST 1.8.4 from our repo mirror (openfst.org blocks CI IPs)
-          curl -fSL \
-            "https://github.com/beshkenadze/KaldiAlignerKit/releases/download/openfst-1.8.4/openfst-1.8.4.tar.gz" \
-            -o openfst-1.8.4.tar.gz
-          tar xf openfst-1.8.4.tar.gz
-
-          # Build OpenFST directly (bypass check_dependencies.sh)
-          cd openfst-1.8.4
-          CXXFLAGS="-O3 -fPIC" ./configure \
-            --enable-static --disable-shared \
-            --enable-far --enable-ngram-fsts \
-            --enable-lookahead-fsts --with-pic \
-            --prefix="$(cd .. && pwd)/openfst"
-          make -j$(sysctl -n hw.ncpu)
-          make install
+      - name: Render source manifest
+        run: ./scripts/render-package-manifest.sh source
 
       - name: Build Kaldi
-        if: steps.cache-kaldi.outputs.cache-hit != 'true'
-        run: |
-          cd /tmp/kaldi/src
-          ./configure --static --static-fst --fst-root="$(cd ../tools/openfst && pwd)" --fst-version=1.8.4
-          CXXFLAGS="-O3 -fPIC" make -j$(sysctl -n hw.ncpu) \
-            base matrix util feat tree gmm hmm transform fstext decoder lat lm
+        run: ./scripts/build-kaldi.sh "$PWD/.build/vendor/kaldi"
 
-          # Kaldi creates kaldi-*.a (no lib prefix); linker expects libkaldi-*.a
-          find /tmp/kaldi/src -maxdepth 2 -name 'kaldi-*.a' | while IFS= read -r f; do
-            ln -sf "$f" "$(dirname "$f")/lib$(basename "$f")"
-          done
+      - name: Build package
+        run: KALDI_ROOT="$PWD/.build/vendor/kaldi" swift build --target KaldiAlignerKit
 
-      - name: Symlink Kaldi to expected path
-        run: |
-          sudo mkdir -p /Volumes/DATA
-          sudo ln -s /tmp/kaldi /Volumes/DATA/kaldi
+      - name: Run tests
+        run: KALDI_ROOT="$PWD/.build/vendor/kaldi" swift test
 
-      - name: Verify Kaldi libs
-        run: |
-          echo "=== Kaldi static libs ==="
-          find /Volumes/DATA/kaldi/src -name 'libkaldi-*.a' | sort | head -5
-          echo "=== OpenFST libs ==="
-          find /Volumes/DATA/kaldi/tools/openfst/lib -name '*.a' | sort
+  binary-consumer-smoke:
+    name: Binary Consumer Smoke
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: Build
-        run: swift build --target KaldiAlignerKit
+      - name: Validate checked-in binary manifest
+        run: swift package dump-package
 
-      - name: Test
-        run: swift test
+      - name: Install build dependencies
+        run: brew install automake autoconf libtool
+
+      - name: Render source manifest
+        run: ./scripts/render-package-manifest.sh source
+
+      - name: Build xcframework
+        run: ./scripts/build-xcframework.sh ci-smoke
+
+      - name: Build clean client against binary target
+        run: ./scripts/run-binary-consumer-smoke.sh

@@ -22,11 +22,13 @@ struct AlignmentResult {
 };
 
 /// Create aligner from MFA model directory and dictionary file.
-/// model_dir: path to extracted MFA model (contains final.mdl, tree, lda.mat)
+/// model_dir: path to extracted MFA model (contains tree, lda.mat, phones.txt, and final.alimdl or final.mdl)
+/// model_path: resolved path to preferred acoustic model binary (final.alimdl or final.mdl)
 /// dict_path: path to pronunciation dictionary (word\tphone1 phone2...)
 /// Returns NULL on failure (check kaldi_aligner_last_error).
 KaldiAlignerRef kaldi_aligner_create(
     const char* model_dir,
+    const char* model_path,
     const char* dict_path);
 
 void kaldi_aligner_destroy(KaldiAlignerRef aligner);

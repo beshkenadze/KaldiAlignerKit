@@ -27,6 +27,74 @@ struct WordResult: Codable {
     let confidence: Double?
 }
 
+enum BenchError: Error, CustomStringConvertible {
+    case invalidArguments(String)
+    case audioConversion(String)
+
+    var description: String {
+        switch self {
+        case let .invalidArguments(message), let .audioConversion(message):
+            message
+        }
+    }
+}
+
+struct BenchConfig {
+    let audioPath: String
+    let transcript: String
+    let modelDir: String
+    let dictPath: String
+    let outputPath: String
+    let language: String
+
+    static func parse(arguments: [String]) throws -> BenchConfig {
+        var values: [String: String] = [:]
+        var index = 0
+
+        while index < arguments.count {
+            let key = arguments[index]
+            guard key.hasPrefix("--") else {
+                throw BenchError.invalidArguments("Unexpected argument: \(key)")
+            }
+            let valueIndex = index + 1
+            guard valueIndex < arguments.count else {
+                throw BenchError.invalidArguments("Missing value for \(key)")
+            }
+            values[key] = arguments[valueIndex]
+            index += 2
+        }
+
+        guard let audioPath = values["--audio"],
+              let transcript = values["--transcript"],
+              let modelDir = values["--model-dir"],
+              let dictPath = values["--dict"],
+              let outputPath = values["--output"]
+        else {
+            throw BenchError.invalidArguments("Missing required arguments.")
+        }
+
+        return BenchConfig(
+            audioPath: audioPath,
+            transcript: transcript,
+            modelDir: modelDir,
+            dictPath: dictPath,
+            outputPath: outputPath,
+            language: values["--language"] ?? "unknown"
+        )
+    }
+
+    static let usage = """
+    Usage:
+      swift run swift-kaldi-bench \
+        --audio /path/to/audio.wav \
+        --transcript "hello world" \
+        --model-dir /path/to/model \
+        --dict /path/to/model.dict \
+        --output /path/to/result.json \
+        [--language en]
+    """
+}
+
 func loadAudioAsPCM16kHz(_ path: String) throws -> [Float] {
     let url = URL(fileURLWithPath: path)
     let file = try AVAudioFile(forReading: url)
@@ -38,18 +106,18 @@ func loadAudioAsPCM16kHz(_ path: String) throws -> [Float] {
         channels: 1,
         interleaved: false
     ) else {
-        fatalError("Cannot create target audio format")
+        throw BenchError.audioConversion("Cannot create target audio format")
     }
 
     guard let converter = AVAudioConverter(from: file.processingFormat, to: format) else {
-        fatalError("Cannot create audio converter")
+        throw BenchError.audioConversion("Cannot create audio converter")
     }
 
     let frameCount = AVAudioFrameCount(
         Double(file.length) * targetRate / file.processingFormat.sampleRate
     )
     guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
-        fatalError("Cannot create output buffer")
+        throw BenchError.audioConversion("Cannot create output buffer")
     }
 
     var convError: NSError?
@@ -77,107 +145,82 @@ func loadAudioAsPCM16kHz(_ path: String) throws -> [Float] {
     }
 
     guard let floatData = outputBuffer.floatChannelData else {
-        fatalError("No float channel data")
+        throw BenchError.audioConversion("No float channel data")
     }
     let count = Int(outputBuffer.frameLength)
     return Array(UnsafeBufferPointer(start: floatData[0], count: count))
 }
 
-struct BenchConfig {
-    let lang: String
-    let audioPath: String
-    let transcript: String
-    let modelDir: String
-    let dictPath: String
-    let outputPath: String
-}
-
-func runBenchmark(_ config: BenchConfig) {
-    print("[\(config.lang)] Loading model from \(config.modelDir)...")
+@discardableResult
+func runBenchmark(_ config: BenchConfig) throws -> BenchResult {
+    print("[\(config.language)] Loading model from \(config.modelDir)...")
     let loadStart = CFAbsoluteTimeGetCurrent()
-    let aligner: KaldiAligner
-    do {
-        aligner = try KaldiAligner(modelDir: config.modelDir, dictPath: config.dictPath)
-    } catch {
-        print("[\(config.lang)] ERROR: Failed to create aligner: \(error)")
-        return
-    }
+    let aligner = try KaldiAligner(modelDir: config.modelDir, dictPath: config.dictPath)
     let loadTime = CFAbsoluteTimeGetCurrent() - loadStart
-    print("[\(config.lang)] Model loaded in \(String(format: "%.3f", loadTime))s")
+    print("[\(config.language)] Model loaded in \(String(format: "%.3f", loadTime))s")
 
-    print("[\(config.lang)] Loading audio from \(config.audioPath)...")
-    let audio: [Float]
-    do {
-        audio = try loadAudioAsPCM16kHz(config.audioPath)
-    } catch {
-        print("[\(config.lang)] ERROR: Failed to load audio: \(error)")
-        return
-    }
+    print("[\(config.language)] Loading audio from \(config.audioPath)...")
+    let audio = try loadAudioAsPCM16kHz(config.audioPath)
     let duration = String(format: "%.1f", Double(audio.count) / 16_000)
-    print("[\(config.lang)] Audio loaded: \(audio.count) samples (\(duration)s)")
+    print("[\(config.language)] Audio loaded: \(audio.count) samples (\(duration)s)")
 
-    print("[\(config.lang)] Aligning...")
+    print("[\(config.language)] Aligning...")
     let inferStart = CFAbsoluteTimeGetCurrent()
-    let alignments: [WordAlignment]
-    do {
-        alignments = try aligner.align(
-            audio: audio,
-            sampleRate: 16_000,
-            transcript: config.transcript
-        )
-    } catch {
-        print("[\(config.lang)] ERROR: Alignment failed: \(error)")
-        return
-    }
+    let alignments = try aligner.align(
+        audio: audio,
+        sampleRate: 16_000,
+        transcript: config.transcript
+    )
     let inferTime = CFAbsoluteTimeGetCurrent() - inferStart
     let elapsed = String(format: "%.3f", inferTime)
-    print("[\(config.lang)] Alignment done in \(elapsed)s — \(alignments.count) words")
+    print("[\(config.language)] Alignment done in \(elapsed)s — \(alignments.count) words")
 
-    for w in alignments {
-        print("  \(String(format: "%7.3f", w.startTime)) - \(String(format: "%7.3f", w.endTime))  \(w.word)")
+    for word in alignments {
+        print(
+            "  \(String(format: "%7.3f", word.startTime)) - " +
+                "\(String(format: "%7.3f", word.endTime))  \(word.word)"
+        )
     }
 
     let result = BenchResult(
         model: "swift-kaldi-aligner",
         audioFile: config.audioPath,
-        language: config.lang,
+        language: config.language,
         inferenceTimeSeconds: inferTime,
         modelLoadTimeSeconds: loadTime,
         peakMemoryMb: 0,
         words: alignments.map {
-            WordResult(word: $0.word, start: Double($0.startTime), end: Double($0.endTime), confidence: nil)
+            WordResult(
+                word: $0.word,
+                start: Double($0.startTime),
+                end: Double($0.endTime),
+                confidence: nil
+            )
         }
     )
+
+    let outputURL = URL(fileURLWithPath: config.outputPath)
+    try FileManager.default.createDirectory(
+        at: outputURL.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+    )
+
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-    guard let data = try? encoder.encode(result),
-          let json = String(data: data, encoding: .utf8) else { return }
-    try? json.write(toFile: config.outputPath, atomically: true, encoding: .utf8)
-    print("[\(config.lang)] Results written to \(config.outputPath)")
+    let data = try encoder.encode(result)
+    try data.write(to: outputURL, options: .atomic)
+    print("[\(config.language)] Results written to \(config.outputPath)")
+
+    return result
 }
 
-// MARK: - Main
-
-let outputDir = "/Volumes/DATA/alignment-benchmark/results"
-
-// EN
-// swiftlint:disable line_length
-runBenchmark(BenchConfig(
-    lang: "en",
-    audioPath: "\(NSHomeDirectory())/Downloads/Contracts Week 1 Module 1 Slides_30sec.mp3",
-    transcript: "Well hello and welcome Welcome to U.S. Contract Law for the Bar My name is Mike Sims and I am genuinely excited to be your guide for this course Now I realize that you may have studied law in another country Well that's okay because this class is designed to meet you exactly where you are My mission My mission is very simple to give you a fundamental understanding of the law of contracts in the U.S. and to highlight",
-    modelDir: "/Volumes/DATA/mfa_models/english/english_mfa",
-    dictPath: "\(NSHomeDirectory())/Documents/MFA/pretrained_models/dictionary/english_mfa.dict",
-    outputPath: "\(outputDir)/swift_kaldi_en.json"
-))
-
-// RU
-runBenchmark(BenchConfig(
-    lang: "ru",
-    audioPath: "\(NSHomeDirectory())/Downloads/Spoon Episodex/Episode 171/compare/episode171-original_trim10_10s.wav",
-    transcript: "Новый год и Рождество о чём ещё можно говорить кроме как о Гарри Поттере И эта замечательная серия книг на мой взгляд является лучшим произведением",
-    modelDir: "/Volumes/DATA/mfa_models/russian/russian_mfa/russian_mfa",
-    dictPath: "\(NSHomeDirectory())/Documents/MFA/pretrained_models/dictionary/russian_mfa.dict",
-    outputPath: "\(outputDir)/swift_kaldi_ru.json"
-))
-// swiftlint:enable line_length
+do {
+    let config = try BenchConfig.parse(arguments: Array(CommandLine.arguments.dropFirst()))
+    _ = try runBenchmark(config)
+} catch {
+    fputs("\(error)\n", stderr)
+    if case BenchError.invalidArguments = error {
+        fputs("\n\(BenchConfig.usage)\n", stderr)
+    }
+    exit(EXIT_FAILURE)
+}

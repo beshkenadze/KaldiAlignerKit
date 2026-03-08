@@ -1,4 +1,5 @@
-import KaldiCore
+import Foundation
+@_implementationOnly import KaldiCore
 
 public struct WordAlignment {
     public let word: String
@@ -16,10 +17,25 @@ public final class KaldiAligner {
 
     /// Create aligner from extracted MFA model directory and dictionary file.
     /// - Parameters:
-    ///   - modelDir: Path to extracted MFA model (contains final.mdl, tree, lda.mat, phones.txt)
+    ///   - modelDir: Path to extracted MFA model (contains tree, lda.mat, phones.txt, and final.alimdl or final.mdl)
     ///   - dictPath: Path to pronunciation dictionary (word\tphone1 phone2...)
-    public init(modelDir: String, dictPath: String) throws {
-        guard let h = kaldi_aligner_create(modelDir, dictPath) else {
+    public convenience init(modelDir: String, dictPath: String) throws {
+        try self.init(
+            modelDir: URL(fileURLWithPath: modelDir, isDirectory: true),
+            dictURL: URL(fileURLWithPath: dictPath)
+        )
+    }
+
+    public init(modelDir: URL, dictURL: URL) throws {
+        let modelBinaryURL: URL
+        do {
+            modelBinaryURL = try ModelArtifacts.validateModelDirectory(at: modelDir)
+            try ModelArtifacts.validateDictionary(at: dictURL)
+        } catch {
+            throw AlignerError.initFailed(String(describing: error))
+        }
+
+        guard let h = kaldi_aligner_create(modelDir.path, modelBinaryURL.path, dictURL.path) else {
             throw AlignerError.initFailed("kaldi_aligner_create returned nil")
         }
         if let err = kaldi_aligner_last_error(h) {

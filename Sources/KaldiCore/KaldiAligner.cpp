@@ -288,17 +288,20 @@ struct KaldiAlignerOpaque {
 
 KaldiAlignerRef kaldi_aligner_create(
     const char* model_dir,
+    const char* model_path,
     const char* dict_path)
 {
     auto* a = new KaldiAlignerOpaque();
     try {
         std::string dir(model_dir);
+        std::string model(model_path);
 
         // 1. Phone mapping
         a->phone_to_id = ParsePhonesFile(dir + "/phones.txt");
         a->sil_phone_id = a->phone_to_id.at("sil");
         if (a->phone_to_id.count("spn"))
             a->spn_phone_id = a->phone_to_id.at("spn");
+        a->meta = ParseModelMeta(dir);
 
         // 2. Dictionary → word IDs
         auto dict = ParseDictionary(dict_path);
@@ -323,7 +326,7 @@ KaldiAlignerRef kaldi_aligner_create(
         // 3. Load acoustic model (TransitionModel + AmDiagGmm)
         {
             bool binary;
-            kaldi::Input ki(dir + "/final.alimdl", &binary);
+            kaldi::Input ki(model, &binary);
             a->trans_model.Read(ki.Stream(), binary);
             a->am_gmm.Read(ki.Stream(), binary);
         }

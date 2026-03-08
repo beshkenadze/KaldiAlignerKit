@@ -1,9 +1,31 @@
+import Darwin
 import Foundation
+@_implementationOnly import ZIPFoundation
 
 /// Paths to a downloaded MFA model (acoustic model directory + pronunciation dictionary).
 public struct MFAModelPaths: Sendable {
-    public let modelDir: String
-    public let dictPath: String
+    public let modelDirURL: URL
+    public let dictURL: URL
+
+    public var modelDir: String {
+        modelDirURL.path
+    }
+
+    public var dictPath: String {
+        dictURL.path
+    }
+
+    public init(modelDirURL: URL, dictURL: URL) {
+        self.modelDirURL = modelDirURL
+        self.dictURL = dictURL
+    }
+
+    public init(modelDir: String, dictPath: String) {
+        self.init(
+            modelDirURL: URL(fileURLWithPath: modelDir, isDirectory: true),
+            dictURL: URL(fileURLWithPath: dictPath)
+        )
+    }
 }
 
 /// Errors during model download or extraction.
@@ -18,6 +40,76 @@ public enum ModelDownloadError: Error, CustomStringConvertible {
         case let .extractionFailed(msg): "Extraction failed: \(msg)"
         case let .modelValidationFailed(msg): "Model validation failed: \(msg)"
         }
+    }
+}
+
+struct DownloaderTestHooks {
+    var downloadFile: @Sendable (URL, URL) async throws -> Void
+    var extractArchive: @Sendable (URL, URL) async throws -> Void
+
+    static let live = DownloaderTestHooks(
+        downloadFile: { sourceURL, destinationURL in
+            let (tempURL, response) = try await URLSession.shared.download(from: sourceURL)
+            defer { try? FileManager.default.removeItem(at: tempURL) }
+
+            guard let http = response as? HTTPURLResponse, 200 ..< 300 ~= http.statusCode else {
+                let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+                throw ModelDownloadError.downloadFailed("HTTP \(code) for \(sourceURL.absoluteString)")
+            }
+
+            try FileManager.default.createDirectory(
+                at: destinationURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+
+            if FileManager.default.fileExists(atPath: destinationURL.path) {
+                try FileManager.default.removeItem(at: destinationURL)
+            }
+            try FileManager.default.moveItem(at: tempURL, to: destinationURL)
+        },
+        extractArchive: { sourceURL, destinationURL in
+            try FileManager.default.createDirectory(
+                at: destinationURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try FileManager.default.unzipItem(at: sourceURL, to: destinationURL)
+        }
+    )
+}
+
+private actor DownloaderHookStore {
+    private var hooks = DownloaderTestHooks.live
+
+    func withHooks<T: Sendable>(
+        _ newHooks: DownloaderTestHooks,
+        operation: @Sendable () async throws -> T
+    ) async rethrows -> T {
+        let previous = hooks
+        hooks = newHooks
+        defer { hooks = previous }
+        return try await operation()
+    }
+
+    func currentHooks() -> DownloaderTestHooks {
+        hooks
+    }
+}
+
+private actor DownloadCoordinator {
+    private var inFlightTasks: [String: Task<MFAModelPaths, Error>] = [:]
+
+    func perform(
+        key: String,
+        operation: @escaping @Sendable () async throws -> MFAModelPaths
+    ) async throws -> MFAModelPaths {
+        if let task = inFlightTasks[key] {
+            return try await task.value
+        }
+
+        let task = Task(operation: operation)
+        inFlightTasks[key] = task
+        defer { inFlightTasks[key] = nil }
+        return try await task.value
     }
 }
 
@@ -40,9 +132,8 @@ public enum MFAModelDownloader {
     ]
 
     private static let baseURL = "https://github.com/MontrealCorpusTools/mfa-models/releases/download"
-
-    private static let requiredFiles = ["tree", "lda.mat", "phones.txt"]
-    private static let modelFiles = ["final.alimdl", "final.mdl"]
+    private static let hooks = DownloaderHookStore()
+    private static let coordinator = DownloadCoordinator()
 
     /// Download an MFA acoustic model and dictionary.
     ///
@@ -58,106 +149,205 @@ public enum MFAModelDownloader {
     ) async throws -> MFAModelPaths {
         let ver = version ?? knownVersions[name] ?? "3.1.0"
         let cache = cacheDir ?? defaultCacheDir()
-        let modelDir = cache.appendingPathComponent("acoustic/\(name)/v\(ver)/\(name)")
-        let dictPath = cache.appendingPathComponent("dictionary/\(name)/v\(ver)/\(name).dict")
+        let modelDir = cache.appendingPathComponent("acoustic/\(name)/v\(ver)/\(name)", isDirectory: true)
+        let dictURL = cache.appendingPathComponent("dictionary/\(name)/v\(ver)/\(name).dict")
+        let key = "\(name)-\(ver)-\(cache.path)"
 
-        let modelReady = validateModelDir(modelDir.path)
-        let dictReady = FileManager.default.fileExists(atPath: dictPath.path)
+        return try await coordinator.perform(key: key) {
+            try await withModelLock(name: name, version: ver, cacheDir: cache) {
+                if let ready = try cachedPathsIfReady(modelDir: modelDir, dictURL: dictURL) {
+                    return ready
+                }
 
-        if modelReady, dictReady {
-            return MFAModelPaths(modelDir: modelDir.path, dictPath: dictPath.path)
-        }
+                let activeHooks = await hooks.currentHooks()
 
-        if !modelReady {
-            let acousticURL = "\(baseURL)/acoustic-\(name)-v\(ver)/\(name).zip"
-            let extractDir = modelDir.deletingLastPathComponent()
-            try createDir(extractDir)
-            try await downloadAndExtractZip(from: acousticURL, to: extractDir)
+                if try !isModelReady(at: modelDir) {
+                    try await downloadModel(
+                        name: name,
+                        version: ver,
+                        cacheDir: cache,
+                        finalModelDir: modelDir,
+                        hooks: activeHooks
+                    )
+                }
 
-            guard validateModelDir(modelDir.path) else {
-                throw ModelDownloadError.modelValidationFailed(
-                    "Extracted model missing required files at \(modelDir.path)"
-                )
+                if !isDictionaryReady(at: dictURL) {
+                    try await downloadDictionary(
+                        name: name,
+                        version: ver,
+                        cacheDir: cache,
+                        finalDictURL: dictURL,
+                        hooks: activeHooks
+                    )
+                }
+
+                guard let ready = try cachedPathsIfReady(modelDir: modelDir, dictURL: dictURL) else {
+                    throw ModelDownloadError.modelValidationFailed(
+                        "Downloaded artifacts are not valid for \(name) v\(ver)"
+                    )
+                }
+
+                return ready
             }
         }
+    }
 
-        if !dictReady {
-            let dictURL = "\(baseURL)/dictionary-\(name)-v\(ver)/\(name).dict"
-            let dictDir = dictPath.deletingLastPathComponent()
-            try createDir(dictDir)
-            try await downloadFile(from: dictURL, to: dictPath)
-        }
-
-        return MFAModelPaths(modelDir: modelDir.path, dictPath: dictPath.path)
+    static func withTestHooks<T: Sendable>(
+        _ testHooks: DownloaderTestHooks,
+        operation: @Sendable () async throws -> T
+    ) async rethrows -> T {
+        try await hooks.withHooks(testHooks, operation: operation)
     }
 
     // MARK: - Private
 
     private static func defaultCacheDir() -> URL {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
-        return caches.appendingPathComponent("KaldiAlignerKit")
+        return caches.appendingPathComponent("KaldiAlignerKit", isDirectory: true)
     }
 
-    private static func createDir(_ url: URL) throws {
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    private static func cachedPathsIfReady(
+        modelDir: URL,
+        dictURL: URL
+    ) throws -> MFAModelPaths? {
+        guard try isModelReady(at: modelDir), isDictionaryReady(at: dictURL) else {
+            return nil
+        }
+        return MFAModelPaths(modelDirURL: modelDir, dictURL: dictURL)
     }
 
-    private static func validateModelDir(_ path: String) -> Bool {
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: path) else { return false }
-
-        let hasModelFile = modelFiles.contains { fm.fileExists(atPath: "\(path)/\($0)") }
-        guard hasModelFile else { return false }
-
-        return requiredFiles.allSatisfy { fm.fileExists(atPath: "\(path)/\($0)") }
+    private static func isModelReady(at url: URL) throws -> Bool {
+        do {
+            _ = try ModelArtifacts.validateModelDirectory(at: url)
+            return true
+        } catch {
+            return false
+        }
     }
 
-    private static func downloadFile(from urlString: String, to destination: URL) async throws {
-        guard let url = URL(string: urlString) else {
-            throw ModelDownloadError.downloadFailed("Invalid URL: \(urlString)")
+    private static func isDictionaryReady(at url: URL) -> Bool {
+        do {
+            try ModelArtifacts.validateDictionary(at: url)
+            return true
+        } catch {
+            return false
         }
-
-        let (tempURL, response) = try await URLSession.shared.download(from: url)
-        defer { try? FileManager.default.removeItem(at: tempURL) }
-
-        guard let http = response as? HTTPURLResponse, 200 ..< 300 ~= http.statusCode else {
-            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-            throw ModelDownloadError.downloadFailed("HTTP \(code) for \(urlString)")
-        }
-
-        if FileManager.default.fileExists(atPath: destination.path) {
-            try FileManager.default.removeItem(at: destination)
-        }
-        try FileManager.default.moveItem(at: tempURL, to: destination)
     }
 
-    private static func downloadAndExtractZip(from urlString: String, to extractDir: URL) async throws {
-        guard let url = URL(string: urlString) else {
-            throw ModelDownloadError.downloadFailed("Invalid URL: \(urlString)")
+    private static func downloadModel(
+        name: String,
+        version: String,
+        cacheDir: URL,
+        finalModelDir: URL,
+        hooks: DownloaderTestHooks
+    ) async throws {
+        let acousticURL = try validatedURL(
+            "\(baseURL)/acoustic-\(name)-v\(version)/\(name).zip"
+        )
+        let tempRoot = cacheDir.appendingPathComponent(
+            "tmp/\(name)-\(version)-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        let archiveURL = tempRoot.appendingPathComponent("\(name).zip")
+        let extractURL = tempRoot.appendingPathComponent("extract", isDirectory: true)
+
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        do {
+            try await hooks.downloadFile(acousticURL, archiveURL)
+            try await hooks.extractArchive(archiveURL, extractURL)
+
+            let extractedModelDir = extractURL.appendingPathComponent(name, isDirectory: true)
+            _ = try validatedModelURL(at: extractedModelDir)
+
+            try FileManager.default.createDirectory(
+                at: finalModelDir.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            if FileManager.default.fileExists(atPath: finalModelDir.path) {
+                try FileManager.default.removeItem(at: finalModelDir)
+            }
+            try FileManager.default.moveItem(at: extractedModelDir, to: finalModelDir)
+        } catch let error as ModelDownloadError {
+            throw error
+        } catch {
+            throw ModelDownloadError.extractionFailed(error.localizedDescription)
+        }
+    }
+
+    private static func downloadDictionary(
+        name: String,
+        version: String,
+        cacheDir: URL,
+        finalDictURL: URL,
+        hooks: DownloaderTestHooks
+    ) async throws {
+        let dictionaryURL = try validatedURL(
+            "\(baseURL)/dictionary-\(name)-v\(version)/\(name).dict"
+        )
+        let tempRoot = cacheDir.appendingPathComponent(
+            "tmp/\(name)-\(version)-dict-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        let tempDictURL = tempRoot.appendingPathComponent("\(name).dict")
+
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        try await hooks.downloadFile(dictionaryURL, tempDictURL)
+        do {
+            try ModelArtifacts.validateDictionary(at: tempDictURL)
+        } catch {
+            throw ModelDownloadError.modelValidationFailed(String(describing: error))
         }
 
-        let (tempURL, response) = try await URLSession.shared.download(from: url)
-        defer { try? FileManager.default.removeItem(at: tempURL) }
-
-        guard let http = response as? HTTPURLResponse, 200 ..< 300 ~= http.statusCode else {
-            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-            throw ModelDownloadError.downloadFailed("HTTP \(code) for \(urlString)")
+        try FileManager.default.createDirectory(
+            at: finalDictURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        if FileManager.default.fileExists(atPath: finalDictURL.path) {
+            try FileManager.default.removeItem(at: finalDictURL)
         }
+        try FileManager.default.moveItem(at: tempDictURL, to: finalDictURL)
+    }
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
-        process.arguments = ["-xk", tempURL.path, extractDir.path]
-
-        let pipe = Pipe()
-        process.standardError = pipe
-
-        try process.run()
-        process.waitUntilExit()
-
-        guard process.terminationStatus == 0 else {
-            let stderr = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            throw ModelDownloadError.extractionFailed("ditto exit \(process.terminationStatus): \(stderr)")
+    private static func validatedModelURL(at url: URL) throws -> URL {
+        do {
+            return try ModelArtifacts.validateModelDirectory(at: url)
+        } catch {
+            throw ModelDownloadError.modelValidationFailed(String(describing: error))
         }
+    }
+
+    private static func validatedURL(_ string: String) throws -> URL {
+        guard let url = URL(string: string) else {
+            throw ModelDownloadError.downloadFailed("Invalid URL: \(string)")
+        }
+        return url
+    }
+
+    private static func withModelLock<T>(
+        name: String,
+        version: String,
+        cacheDir: URL,
+        operation: () async throws -> T
+    ) async throws -> T {
+        let lockDir = cacheDir.appendingPathComponent(".locks", isDirectory: true)
+        try FileManager.default.createDirectory(at: lockDir, withIntermediateDirectories: true)
+        let lockURL = lockDir.appendingPathComponent("\(name)-\(version).lock")
+        let fd = open(lockURL.path, O_CREAT | O_RDWR, 0o644)
+        guard fd >= 0 else {
+            throw ModelDownloadError.downloadFailed("Unable to open lock file at \(lockURL.path)")
+        }
+        defer { close(fd) }
+
+        guard flock(fd, LOCK_EX) == 0 else {
+            throw ModelDownloadError.downloadFailed("Unable to acquire lock for \(name) v\(version)")
+        }
+        defer { flock(fd, LOCK_UN) }
+
+        return try await operation()
     }
 }
 
@@ -176,6 +366,6 @@ public extension KaldiAligner {
         cacheDir: URL? = nil
     ) async throws -> KaldiAligner {
         let paths = try await MFAModelDownloader.download(name, version: version, cacheDir: cacheDir)
-        return try KaldiAligner(modelDir: paths.modelDir, dictPath: paths.dictPath)
+        return try KaldiAligner(modelDir: paths.modelDirURL, dictURL: paths.dictURL)
     }
 }

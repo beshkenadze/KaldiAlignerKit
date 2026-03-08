@@ -1,6 +1,7 @@
 .build/
 xc-build/
 .swiftpm/xcode/
+Package.resolved
 .DS_Store
 *.o
 *.a

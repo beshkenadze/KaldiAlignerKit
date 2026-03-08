@@ -2,8 +2,8 @@
 import PackageDescription
 
 // The release workflow renders concrete artifact coordinates into this manifest before tagging.
-let artifactURL = "https://example.invalid/KaldiAlignerKit.xcframework.zip"
-let artifactChecksum = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+let artifactURL = "__ARTIFACT_URL__"
+let artifactChecksum = "__ARTIFACT_CHECKSUM__"
 
 let package = Package(
     name: "KaldiAlignerKit",

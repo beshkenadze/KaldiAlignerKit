@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version without leading v, e.g. 0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and Publish Release
+    runs-on: macos-15
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: brew install automake autoconf libtool
+
+      - name: Render source manifest
+        run: ./scripts/render-package-manifest.sh source
+
+      - name: Build xcframework
+        run: ./scripts/build-xcframework.sh "$VERSION"
+
+      - name: Smoke test binary consumer package
+        run: ./scripts/run-binary-consumer-smoke.sh
+
+      - name: Prepare binary manifest
+        run: |
+          CHECKSUM="$(cat ".build/artifacts/KaldiAlignerKit-${VERSION}.checksum.txt")"
+          ARTIFACT_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/KaldiAlignerKit-${VERSION}.xcframework.zip"
+          ./scripts/render-package-manifest.sh binary "$ARTIFACT_URL" "$CHECKSUM"
+
+      - name: Commit release manifest
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Package.swift
+          git commit -m "chore(release): prepare v${VERSION}" || true
+          git tag "v${VERSION}"
+          git push origin HEAD
+          git push origin "v${VERSION}"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.version }}
+          files: |
+            .build/artifacts/KaldiAlignerKit-${{ inputs.version }}.xcframework.zip
+            .build/artifacts/KaldiAlignerKit-${{ inputs.version }}.checksum.txt
+            .build/artifacts/KaldiAlignerKit-${{ inputs.version }}.THIRD_PARTY_NOTICES.txt
