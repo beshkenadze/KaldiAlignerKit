@@ -82,6 +82,9 @@ jobs:
         if: steps.cache-kaldi.outputs.cache-hit != 'true'
         run: ./scripts/build-kaldi.sh "$PWD/${{ env.KALDI_CACHE_DIR }}"
 
+      - name: Normalize Kaldi linker archives
+        run: ./scripts/build-kaldi.sh "$PWD/${{ env.KALDI_CACHE_DIR }}"
+
       - name: Upload Kaldi toolchain artifact
         uses: actions/upload-artifact@v4
         with:
@@ -102,6 +105,9 @@ jobs:
         with:
           name: kaldi-toolchain-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.KALDI_CACHE_DIR }}
+
+      - name: Normalize Kaldi linker archives
+        run: ./scripts/build-kaldi.sh "$PWD/${{ env.KALDI_CACHE_DIR }}"
 
       - name: Render source manifest
         run: ./scripts/render-package-manifest.sh source
@@ -127,6 +133,9 @@ jobs:
         with:
           name: kaldi-toolchain-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.KALDI_CACHE_DIR }}
+
+      - name: Normalize Kaldi linker archives
+        run: ./scripts/build-kaldi.sh "$PWD/${{ env.KALDI_CACHE_DIR }}"
 
       - name: Render source manifest
         run: ./scripts/render-package-manifest.sh source

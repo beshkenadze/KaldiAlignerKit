@@ -10,7 +10,23 @@ OPENFST_SHA256="${OPENFST_SHA256:-}"
 
 mkdir -p "$PREFIX"
 
-if [[ -f "$PREFIX/src/base/libkaldi-base.a" && -f "$PREFIX/tools/openfst/lib/libfst.a" ]]; then
+ensure_libkaldi_links() {
+  local kaldi_root="$1"
+
+  if [[ ! -d "$kaldi_root/src" ]]; then
+    return 0
+  fi
+
+  find "$kaldi_root/src" -maxdepth 2 -type f -name 'kaldi-*.a' | while IFS= read -r archive; do
+    local archive_dir archive_name
+    archive_dir="$(dirname "$archive")"
+    archive_name="$(basename "$archive")"
+    ln -sf "$archive_name" "$archive_dir/lib$archive_name"
+  done
+}
+
+if [[ -f "$PREFIX/src/base/kaldi-base.a" && -f "$PREFIX/tools/openfst/lib/libfst.a" ]]; then
+  ensure_libkaldi_links "$PREFIX"
   echo "Kaldi already present at $PREFIX"
   echo "export KALDI_ROOT=$PREFIX"
   exit 0
@@ -46,14 +62,13 @@ pushd "$KALDI_REPO/src" >/dev/null
 ./configure --static --static-fst --fst-root="$KALDI_REPO/tools/openfst" --fst-version="$OPENFST_VERSION"
 CXXFLAGS="-O3 -fPIC -arch arm64" make -j"$(sysctl -n hw.ncpu)" \
   base matrix util feat tree gmm hmm transform fstext decoder lat lm
-find "$KALDI_REPO/src" -maxdepth 2 -name 'kaldi-*.a' | while IFS= read -r archive; do
-  ln -sf "$archive" "$(dirname "$archive")/lib$(basename "$archive")"
-done
+ensure_libkaldi_links "$KALDI_REPO"
 popd >/dev/null
 
 rm -rf "$PREFIX"
 mkdir -p "$(dirname "$PREFIX")"
 cp -R "$KALDI_REPO" "$PREFIX"
+ensure_libkaldi_links "$PREFIX"
 
 echo "Built Kaldi into $PREFIX"
 echo "export KALDI_ROOT=$PREFIX"
